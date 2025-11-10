@@ -13,7 +13,32 @@ import warnings
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+
+# Configure CORS to allow requests from InfinityFree and other sources
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",  # Allow all origins (InfinityFree has dynamic IPs)
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Accept", "User-Agent"],
+        "expose_headers": ["Content-Type"],
+        "max_age": 3600
+    }
+})
+
+# Request logging for debugging
+@app.before_request
+def log_request_info():
+    """Log incoming requests for debugging"""
+    app.logger.info('Headers: %s', request.headers)
+    app.logger.info('Body: %s', request.get_data())
+
+@app.after_request
+def after_request(response):
+    """Add security headers and ensure CORS"""
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    return response
 
 def calculate_price_estimation(current_price, property_size, historical_data=None):
     """
@@ -22,7 +47,8 @@ def calculate_price_estimation(current_price, property_size, historical_data=Non
     Args:
         current_price: Current total property price (2025)
         property_size: Property size in square meters
-        historical_data: Dictionary of historical prices from database (2020-2024)
+        historical_data: Dictionary of historical TOTAL prices from database (2020-2024)
+                        Each value should be: price_per_sqm × property_size
     
     Returns:
         Dictionary containing estimation results
@@ -30,8 +56,11 @@ def calculate_price_estimation(current_price, property_size, historical_data=Non
     
     # Use provided historical data or fall back to default Tarlac BIR rates
     if historical_data and len(historical_data) > 0:
-        # Use database historical data
-        price_data = historical_data
+        # Use database historical TOTAL prices
+        # Convert total prices to price per sqm for regression calculations
+        price_data = {}
+        for year_str, total_price in historical_data.items():
+            price_data[year_str] = float(total_price) / property_size
     else:
         # Fallback to default Tarlac City BIR rates per sqm
         price_data = {
@@ -42,7 +71,7 @@ def calculate_price_estimation(current_price, property_size, historical_data=Non
             '2024': 85
         }
     
-    # Add current year data (2025)
+    # Add current year data (2025) - convert to price per sqm
     price_data['2025'] = current_price / property_size
     
     # Prepare data for linear regression
@@ -231,38 +260,49 @@ def health():
         'service': 'price-estimation-api'
     })
 
-@app.route('/api/estimate', methods=['POST'])
+@app.route('/api/estimate', methods=['POST', 'OPTIONS'])
 def estimate():
     """
     Calculate price estimation
     
     Expected JSON body:
     {
-        "current_price": 1000000,
+        "current_price": 9500,
         "property_size": 100,
         "historical_data": {
-            "2020": 45,
-            "2021": 52,
-            "2022": 61,
-            "2023": 73,
-            "2024": 85
+            "2020": 4500,
+            "2021": 5200,
+            "2022": 6100,
+            "2023": 7300,
+            "2024": 8500
         }
     }
+    
+    Note: historical_data should contain TOTAL property prices (price_per_sqm × property_size)
+    Example: If property is 100 sqm and 2020 price was ₱45/sqm, send 4500 (45 × 100)
     """
+    # Handle preflight OPTIONS request
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    
     try:
         data = request.get_json()
         
         if not data:
+            app.logger.error('No JSON data provided in request')
             return jsonify({
                 'success': False,
-                'error': 'No JSON data provided'
+                'error': 'No JSON data provided',
+                'help': 'Send POST request with JSON body containing current_price, property_size, and historical_data'
             }), 400
         
         # Validate required fields
         if 'current_price' not in data or 'property_size' not in data:
+            app.logger.error('Missing required fields: %s', data.keys())
             return jsonify({
                 'success': False,
-                'error': 'Missing required fields: current_price and property_size'
+                'error': 'Missing required fields: current_price and property_size',
+                'received_fields': list(data.keys())
             }), 400
         
         current_price = float(data['current_price'])
@@ -273,30 +313,55 @@ def estimate():
         if current_price <= 0 or property_size <= 0:
             return jsonify({
                 'success': False,
-                'error': 'Price and size must be positive numbers'
+                'error': 'Price and size must be positive numbers',
+                'current_price': current_price,
+                'property_size': property_size
             }), 400
+        
+        # Log successful validation
+        app.logger.info('Processing estimation: price=%s, size=%s, historical_years=%s',
+                       current_price, property_size, 
+                       len(historical_data) if historical_data else 0)
         
         # Calculate estimation
         result = calculate_price_estimation(current_price, property_size, historical_data)
         
+        app.logger.info('Estimation successful: estimated_price=%s', 
+                       result['estimation']['estimated_price'])
+        
         return jsonify(result)
         
     except ValueError as e:
+        app.logger.error('ValueError: %s', str(e))
         return jsonify({
             'success': False,
             'error': str(e),
-            'message': 'Invalid input values provided'
+            'message': 'Invalid input values provided',
+            'error_type': 'ValueError'
         }), 400
         
     except Exception as e:
+        app.logger.error('Unexpected error: %s', str(e), exc_info=True)
         return jsonify({
             'success': False,
             'error': str(e),
-            'message': 'An error occurred during calculation'
+            'message': 'An error occurred during calculation',
+            'error_type': type(e).__name__
         }), 500
 
 if __name__ == '__main__':
+    # Configure logging
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
     # Use PORT environment variable for Railway
     import os
     port = int(os.environ.get('PORT', 5000))
+    
+    app.logger.info('Starting Flask API on port %s', port)
+    app.logger.info('API URL: https://web-production-7f611.up.railway.app')
+    
     app.run(host='0.0.0.0', port=port, debug=False)
