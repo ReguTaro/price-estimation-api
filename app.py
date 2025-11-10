@@ -127,14 +127,31 @@ def calculate_price_estimation(current_price, property_size, historical_data=Non
     else:
         predicted_2026_price_per_sqm = best_model.predict(year_2026_normalized)[0]
     
-    # Apply market adjustment factors based on property growth trends
+    # Calculate historical growth rates to apply momentum
     growth_rate = calculate_growth_rate(prices_per_sqm)
     
-    # Adjust prediction based on growth acceleration/deceleration
-    if growth_rate > 15:  # High growth area
-        predicted_2026_price_per_sqm *= 1.05  # Add 5% premium
-    elif growth_rate < 5:  # Low growth area
-        predicted_2026_price_per_sqm *= 0.98  # Apply 2% discount
+    # Calculate recent growth trend (last 2 years weighted more heavily)
+    recent_growth = calculate_recent_trend(prices_per_sqm)
+    
+    # Apply smart market adjustments based on growth momentum
+    # Use weighted average of historical growth and linear prediction
+    if growth_rate > 15:  # High growth area - maintain momentum
+        # Apply 70% of recent growth rate
+        momentum_factor = 1 + (recent_growth / 100 * 0.7)
+        predicted_2026_price_per_sqm = prices_per_sqm[-1] * momentum_factor
+    elif growth_rate > 10:  # Moderate-high growth
+        # Apply 60% of recent growth rate
+        momentum_factor = 1 + (recent_growth / 100 * 0.6)
+        predicted_2026_price_per_sqm = prices_per_sqm[-1] * momentum_factor
+    elif growth_rate > 5:  # Moderate growth
+        # Apply 50% of recent growth rate
+        momentum_factor = 1 + (recent_growth / 100 * 0.5)
+        predicted_2026_price_per_sqm = prices_per_sqm[-1] * momentum_factor
+    else:  # Low growth - conservative prediction
+        # Use 40% of recent growth or minimum 2%
+        adjusted_growth = max(recent_growth * 0.4, 2.0)
+        momentum_factor = 1 + (adjusted_growth / 100)
+        predicted_2026_price_per_sqm = prices_per_sqm[-1] * momentum_factor
     
     # Calculate metrics
     current_price_per_sqm = current_price / property_size
@@ -215,6 +232,36 @@ def calculate_growth_rate(prices):
             growth_rates.append(rate)
     
     return np.mean(growth_rates) if growth_rates else 0
+
+def calculate_recent_trend(prices):
+    """
+    Calculate recent growth trend with more weight on recent years
+    This gives more realistic predictions based on current momentum
+    """
+    if len(prices) < 3:
+        return calculate_growth_rate(prices)
+    
+    # Calculate growth rates for each year
+    growth_rates = []
+    for i in range(1, len(prices)):
+        if prices[i-1] > 0:
+            rate = ((prices[i] - prices[i-1]) / prices[i-1]) * 100
+            growth_rates.append(rate)
+    
+    if not growth_rates:
+        return 0
+    
+    # Weight recent years more heavily
+    # Last year: 40%, Second last: 30%, Third last: 20%, Rest: 10%
+    if len(growth_rates) >= 3:
+        weights = [0.1 / max(1, len(growth_rates) - 3)] * max(0, len(growth_rates) - 3) + [0.2, 0.3, 0.4]
+        weights = weights[-len(growth_rates):]  # Trim to actual length
+    else:
+        # If less than 3 years, distribute evenly but favor recent
+        weights = [0.3, 0.7][-len(growth_rates):]
+    
+    weighted_growth = sum(rate * weight for rate, weight in zip(growth_rates, weights))
+    return weighted_growth
 
 def calculate_confidence(r_squared, data_points, growth_rate):
     """Calculate confidence score based on multiple factors"""
