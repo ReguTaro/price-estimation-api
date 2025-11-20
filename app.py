@@ -2,11 +2,13 @@
 """
 Flask API for Real Estate Price Estimation using Linear Regression
 This API wraps the linear regression functionality for web access
+Enhanced with Pearson R correlation coefficient for validation
 """
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import numpy as np
+from scipy.stats import pearsonr
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 import warnings
@@ -39,6 +41,29 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
     return response
+
+def interpret_pearson_r(r_value):
+    """
+    Interpret Pearson R correlation coefficient
+    
+    Returns interpretation string based on correlation strength
+    """
+    abs_r = abs(r_value)
+    
+    if abs_r >= 0.90:
+        strength = "Very Strong"
+    elif abs_r >= 0.70:
+        strength = "Strong"
+    elif abs_r >= 0.50:
+        strength = "Moderate"
+    elif abs_r >= 0.30:
+        strength = "Weak"
+    else:
+        strength = "Very Weak"
+    
+    direction = "Positive" if r_value > 0 else "Negative"
+    
+    return f"{strength} {direction} Correlation"
 
 def calculate_price_estimation(current_price, property_size, historical_data=None):
     """
@@ -84,6 +109,11 @@ def calculate_price_estimation(current_price, property_size, historical_data=Non
     
     years = np.array(years).reshape(-1, 1)
     prices_per_sqm = np.array(prices_per_sqm)
+    
+    # Calculate Pearson correlation coefficient
+    # This measures the linear relationship between years and prices
+    years_flat = years.flatten()
+    pearson_r, p_value = pearsonr(years_flat, prices_per_sqm)
     
     # Normalize years for better regression (start from 0)
     years_normalized = years - years.min()
@@ -190,7 +220,11 @@ def calculate_price_estimation(current_price, property_size, historical_data=Non
         })
     
     # Calculate prediction confidence based on data quality and model fit
-    confidence_score = calculate_confidence(best_r_squared, len(price_data), growth_rate)
+    # Now includes Pearson R in the confidence calculation
+    confidence_score = calculate_confidence(best_r_squared, len(price_data), growth_rate, pearson_r)
+    
+    # Interpretation of correlation strength
+    correlation_interpretation = interpret_pearson_r(pearson_r)
     
     # Prepare response
     result = {
@@ -211,7 +245,18 @@ def calculate_price_estimation(current_price, property_size, historical_data=Non
             'slope': round(slope, 4),
             'intercept': round(intercept, 4),
             'r_squared': round(best_r_squared, 4),
+            'pearson_r': round(pearson_r, 4),
+            'p_value': round(p_value, 6),
+            'correlation_interpretation': correlation_interpretation,
             'equation': f"y = {round(slope, 2)}x + {round(intercept, 2)}" if model_type == "linear" else "Polynomial (degree 2)"
+        },
+        'validation': {
+            'pearson_correlation': round(pearson_r, 4),
+            'correlation_strength': correlation_interpretation,
+            'statistical_significance': 'Significant' if p_value < 0.05 else 'Not Significant',
+            'p_value': round(p_value, 6),
+            'sample_size': len(price_data),
+            'note': 'Pearson R measures the strength and direction of linear relationship. Values closer to 1 or -1 indicate stronger correlation.'
         },
         'historical_data': {str(k): v for k, v in price_data.items()},
         'chart_data': chart_data,
@@ -263,23 +308,30 @@ def calculate_recent_trend(prices):
     weighted_growth = sum(rate * weight for rate, weight in zip(growth_rates, weights))
     return weighted_growth
 
-def calculate_confidence(r_squared, data_points, growth_rate):
-    """Calculate confidence score based on multiple factors"""
-    # Base confidence from R-squared (max 60 points)
-    r2_confidence = r_squared * 60
+def calculate_confidence(r_squared, data_points, growth_rate, pearson_r):
+    """
+    Calculate confidence score based on multiple factors
+    Enhanced with Pearson R correlation coefficient
+    """
+    # Base confidence from R-squared (max 40 points)
+    r2_confidence = r_squared * 40
     
-    # Data points factor (max 20 points)
-    data_confidence = min(data_points / 6 * 20, 20)
+    # Pearson R contribution (max 30 points)
+    # Higher absolute value means stronger linear relationship
+    pearson_confidence = (abs(pearson_r) ** 2) * 30
     
-    # Growth rate stability (max 20 points)
+    # Data points factor (max 15 points)
+    data_confidence = min(data_points / 6 * 15, 15)
+    
+    # Growth rate stability (max 15 points)
     if 5 <= growth_rate <= 15:  # Stable growth
-        growth_confidence = 20
+        growth_confidence = 15
     elif growth_rate < 0 or growth_rate > 25:  # Unstable
-        growth_confidence = 5
+        growth_confidence = 3
     else:
-        growth_confidence = 10
+        growth_confidence = 8
     
-    total_confidence = r2_confidence + data_confidence + growth_confidence
+    total_confidence = r2_confidence + pearson_confidence + data_confidence + growth_confidence
     
     return round(min(total_confidence, 100))
 
@@ -290,12 +342,17 @@ def home():
     """Health check endpoint"""
     return jsonify({
         'status': 'online',
-        'message': 'Real Estate Price Estimation API',
-        'version': '1.0.0',
+        'message': 'Real Estate Price Estimation API with Pearson R Validation',
+        'version': '1.1.0',
         'endpoints': {
             '/': 'Health check',
-            '/api/estimate': 'POST - Calculate price estimation',
+            '/api/estimate': 'POST - Calculate price estimation with Pearson R',
             '/health': 'GET - Health check'
+        },
+        'new_features': {
+            'pearson_r': 'Pearson correlation coefficient for validation',
+            'validation': 'Enhanced statistical validation metrics',
+            'confidence': 'Improved confidence score using Pearson R'
         }
     })
 
@@ -304,13 +361,14 @@ def health():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'service': 'price-estimation-api'
+        'service': 'price-estimation-api',
+        'version': '1.1.0'
     })
 
 @app.route('/api/estimate', methods=['POST', 'OPTIONS'])
 def estimate():
     """
-    Calculate price estimation
+    Calculate price estimation with Pearson R validation
     
     Expected JSON body:
     {
@@ -327,6 +385,12 @@ def estimate():
     
     Note: historical_data should contain TOTAL property prices (price_per_sqm × property_size)
     Example: If property is 100 sqm and 2020 price was ₱45/sqm, send 4500 (45 × 100)
+    
+    Returns:
+    - Standard estimation results
+    - Pearson R correlation coefficient
+    - P-value for statistical significance
+    - Correlation interpretation
     """
     # Handle preflight OPTIONS request
     if request.method == 'OPTIONS':
@@ -373,8 +437,9 @@ def estimate():
         # Calculate estimation
         result = calculate_price_estimation(current_price, property_size, historical_data)
         
-        app.logger.info('Estimation successful: estimated_price=%s', 
-                       result['estimation']['estimated_price'])
+        app.logger.info('Estimation successful: estimated_price=%s, pearson_r=%s', 
+                       result['estimation']['estimated_price'],
+                       result['regression']['pearson_r'])
         
         return jsonify(result)
         
@@ -410,5 +475,6 @@ if __name__ == '__main__':
     
     app.logger.info('Starting Flask API on port %s', port)
     app.logger.info('API URL: https://web-production-7f611.up.railway.app')
+    app.logger.info('Enhanced with Pearson R correlation validation')
     
     app.run(host='0.0.0.0', port=port, debug=False)
